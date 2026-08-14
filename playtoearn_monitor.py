@@ -36,7 +36,7 @@ CASHOUT_URL = "https://playtoearn.com/earn/cashout"
 # Read from an environment variable (set as a GitHub Actions secret) so the
 # real value never has to be typed into this file. For local testing you can
 # temporarily replace the os.environ.get(...) call with the string directly.
-COOKIE_STRING = os.environ.get("PLAYTOEARN_COOKIE", "_gcl_au=e3debcc7dbea2aa7920af0431e92040b; _ga=GA1.1.426585220.1785581278; cf_clearance=ZQbhRK7AblQPJl1jtDr3BJssf8BOEkjNsyEDHv7UXyw-1786696853-1.2.1.1-JTkH.6pFuHyicxlbRLA3x9GdSRSSibGaT6e_9ydEJvmg3ejcsuUfw_FWjhlIKMMtwThAtLGm5s1cSJKU94znRgLSstQ74hYazp_Bt1QWY92EaIHRxxwNtz1OL4eW8Oewvv1wKcdAlI8YaluBsGo3F9yWQncs.KEd9QyaT8zZU2sLcyk9KIpeW4xgZnvFW8BdmIiPVHfjAn6nrHmTxCubo.RMrXb4_xZZaaiASdBh1p4AwOXv.fT9ZW4cntq164K4BQJbNT7tm_Wg8dnOaMWwtNLHqdfP2.CjcXpWULpkfz2UvoTs.Gu1pHs_QYsfrPOrhEXnrhOmPjRRtNrcb.Bka7U9yCg76r4W0gFRH339fV3iJHH8nJ4WDPN3QW8j0BlwAa1tijmBXJgwt9rUeDKtCjDK_fKL7EJ1WtpQolwycxOtxDAYczGjbCSKMEmCULGU_1kv3mh4LXbzG0vkzqp24ADVu_S8vBAXN_Qs.jaHzgIgSnhyQrr7oikxS3aZfa_eqk6FVIEhL.up8hPBy3Rd_g; XSRF-TOKEN=ImOFAc41v49z4un3WvY9pjkucaQX4nxP87HYIMeO; playtoearn_best_blockchain_games_list_crypto_games_session=QP8Oie8h3SOxK05BxGWjOCqHzD1lmy4wxgzsVJzN; g_state={"i_l":0,"i_ll":1786677356427,"i_e":{"enable_itp_optimization":24},"i_et":1786677356427}; login_token=75f236dafd05138e63ee6b8ff365975d; _ga_LW6TG8WSMX=GS2.1.s1786677271$o14$g1$t1786677456$j60$l0$h0")
+COOKIE_STRING = os.environ.get("PLAYTOEARN_COOKIE", "PASTE_YOUR_COOKIE_HEADER_HERE")
 
 # Discord: Server Settings > Integrations > Webhooks > New Webhook > Copy URL
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "PASTE_YOUR_DISCORD_WEBHOOK_URL_HERE")
@@ -47,7 +47,7 @@ STATE_FILE = "playtoearn_state.json"
 # =============================================================
 
 HEADERS = {
-    "Cookie": _gcl_au=e3debcc7dbea2aa7920af0431e92040b; _ga=GA1.1.426585220.1785581278; cf_clearance=ZQbhRK7AblQPJl1jtDr3BJssf8BOEkjNsyEDHv7UXyw-1786696853-1.2.1.1-JTkH.6pFuHyicxlbRLA3x9GdSRSSibGaT6e_9ydEJvmg3ejcsuUfw_FWjhlIKMMtwThAtLGm5s1cSJKU94znRgLSstQ74hYazp_Bt1QWY92EaIHRxxwNtz1OL4eW8Oewvv1wKcdAlI8YaluBsGo3F9yWQncs.KEd9QyaT8zZU2sLcyk9KIpeW4xgZnvFW8BdmIiPVHfjAn6nrHmTxCubo.RMrXb4_xZZaaiASdBh1p4AwOXv.fT9ZW4cntq164K4BQJbNT7tm_Wg8dnOaMWwtNLHqdfP2.CjcXpWULpkfz2UvoTs.Gu1pHs_QYsfrPOrhEXnrhOmPjRRtNrcb.Bka7U9yCg76r4W0gFRH339fV3iJHH8nJ4WDPN3QW8j0BlwAa1tijmBXJgwt9rUeDKtCjDK_fKL7EJ1WtpQolwycxOtxDAYczGjbCSKMEmCULGU_1kv3mh4LXbzG0vkzqp24ADVu_S8vBAXN_Qs.jaHzgIgSnhyQrr7oikxS3aZfa_eqk6FVIEhL.up8hPBy3Rd_g; XSRF-TOKEN=ImOFAc41v49z4un3WvY9pjkucaQX4nxP87HYIMeO; playtoearn_best_blockchain_games_list_crypto_games_session=QP8Oie8h3SOxK05BxGWjOCqHzD1lmy4wxgzsVJzN; g_state={"i_l":0,"i_ll":1786677356427,"i_e":{"enable_itp_optimization":24},"i_et":1786677356427}; login_token=75f236dafd05138e63ee6b8ff365975d; _ga_LW6TG8WSMX=GS2.1.s1786677271$o14$g1$t1786677456$j60$l0$h0,
+    "Cookie": COOKIE_STRING,
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
