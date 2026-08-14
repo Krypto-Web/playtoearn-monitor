@@ -60,9 +60,27 @@ def fetch_rewards(debug=False):
     resp = requests.get(CASHOUT_URL, headers=HEADERS, timeout=15)
 
     if resp.status_code in (401, 403):
+        snippet = resp.text[:300].replace("\n", " ").replace("\r", " ").strip()
+        looks_like_bot_block = (
+            "cf-mitigated" in resp.headers
+            or "Just a moment" in resp.text
+            or "Attention Required" in resp.text
+            or "cf-chl" in resp.text
+        )
+        if looks_like_bot_block:
+            hint = (
+                "This looks like a bot-protection challenge page, not a login "
+                "problem — the site may be blocking requests from GitHub's "
+                "servers specifically, regardless of the cookie."
+            )
+        else:
+            hint = (
+                "This looks like a login/cookie problem rather than a bot "
+                "block — the cookie is likely stale, incomplete, or wasn't "
+                "saved correctly."
+            )
         raise RuntimeError(
-            f"Got HTTP {resp.status_code} — your cookie has probably expired. "
-            "Grab a fresh one from DevTools and update COOKIE_STRING."
+            f"Got HTTP {resp.status_code}. {hint}\nResponse snippet: {snippet!r}"
         )
     resp.raise_for_status()
 
