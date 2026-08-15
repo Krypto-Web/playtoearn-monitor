@@ -43,8 +43,9 @@ COINS = {
     "shiba-inu": "SHIB",
 }
 
-CHART_DAYS = 30    # days of history to chart and to compute RSI from
-RSI_PERIOD = 14    # standard RSI lookback window
+CHART_DAYS = 30        # days of history to chart and to compute RSI from
+RSI_PERIOD = 14         # standard RSI lookback window
+BETWEEN_CALLS_SECONDS = 6   # pause between each coin's history request
 
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "PASTE_YOUR_DISCORD_WEBHOOK_URL_HERE")
 
@@ -54,15 +55,32 @@ SIMPLE_PRICE_URL = "https://api.coingecko.com/api/v3/simple/price"
 MARKET_CHART_URL = "https://api.coingecko.com/api/v3/coins/{id}/market_chart"
 
 
-def _check_response(resp):
-    if resp.status_code in (401, 429):
-        raise RuntimeError(
-            f"Got HTTP {resp.status_code} from CoinGecko. If this keeps "
-            "happening, they may now require a free API key for this "
-            "endpoint - sign up at coingecko.com/api and we can add it "
-            "as a header."
-        )
-    resp.raise_for_status()
+def _get_with_retry(url, params, max_retries=5, base_delay=8):
+    """GET with exponential backoff specifically for CoinGecko's 429s."""
+    delay = base_delay
+    for attempt in range(max_retries):
+        resp = requests.get(url, params=params, timeout=15)
+        if resp.status_code == 429:
+            if attempt == max_retries - 1:
+                break
+            print(f"Rate limited, waiting {delay}s (retry {attempt + 1}/{max_retries})...")
+            time.sleep(delay)
+            delay *= 2
+            continue
+        if resp.status_code == 401:
+            raise RuntimeError(
+                "Got HTTP 401 from CoinGecko - they may now require a free "
+                "API key for this endpoint. Sign up at coingecko.com/api "
+                "and we can add it as a header."
+            )
+        resp.raise_for_status()
+        return resp
+
+    raise RuntimeError(
+        "Still rate-limited by CoinGecko after several retries. Try "
+        "increasing BETWEEN_CALLS_SECONDS, reducing the number of coins, "
+        "or getting a free API key at coingecko.com/api."
+    )
 
 
 def fetch_current(ids):
@@ -72,18 +90,15 @@ def fetch_current(ids):
         "include_24hr_change": "true",
         "include_market_cap": "true",
     }
-    resp = requests.get(SIMPLE_PRICE_URL, params=params, timeout=15)
-    _check_response(resp)
+    resp = _get_with_retry(SIMPLE_PRICE_URL, params)
     return resp.json()
 
 
 def fetch_history(coin_id, days=CHART_DAYS):
-    resp = requests.get(
+    resp = _get_with_retry(
         MARKET_CHART_URL.format(id=coin_id),
-        params={"vs_currency": "usd", "days": days},
-        timeout=15,
+        {"vs_currency": "usd", "days": days},
     )
-    _check_response(resp)
     prices = resp.json().get("prices", [])
     return [p[1] for p in prices]
 
@@ -200,11 +215,12 @@ def main():
 
     history_by_id = {}
     rsi_by_id = {}
-    for coin_id in ids:
+    for i, coin_id in enumerate(ids):
         prices = fetch_history(coin_id)
         history_by_id[coin_id] = prices
         rsi_by_id[coin_id] = compute_rsi(prices)
-        time.sleep(1.2)  # be polite to the free API between calls
+        if i < len(ids) - 1:
+            time.sleep(BETWEEN_CALLS_SECONDS)
 
     message = build_message(current_data, rsi_by_id)
     chart_buf = build_chart(history_by_id)
