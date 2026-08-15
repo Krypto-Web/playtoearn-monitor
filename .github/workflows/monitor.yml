@@ -15,7 +15,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      - run: pip install requests
+      - run: pip install requests matplotlib
 
       - name: Send crypto price report
         env:
