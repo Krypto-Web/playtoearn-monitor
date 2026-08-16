@@ -1,9 +1,11 @@
 """
 Hourly crypto price + trend reporter -> Discord
 -------------------------------------------------
-Fetches current prices, 24h change, a simple RSI-based momentum read, and a
-price chart for a list of coins from CoinGecko's free public API, then
-posts a summary + chart image to a Discord webhook.
+Fetches current prices, 24h change, a simple RSI-based momentum read, an
+illustrative TP/SL when RSI flags an extreme, and a price chart, for a list
+of coins from CoinGecko's free public API. Posts a formatted summary +
+chart image to a Discord webhook, pinging @everyone and (optionally) one
+specific person.
 
 No login, no cookies, no account needed - this is a public API meant for
 exactly this kind of use.
@@ -17,6 +19,7 @@ import json
 import os
 import time
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import matplotlib
 matplotlib.use("Agg")  # no display available on a server/CI runner
@@ -43,9 +46,23 @@ COINS = {
     "shiba-inu": "SHIB",
 }
 
-CHART_DAYS = 30        # days of history to chart and to compute RSI from
-RSI_PERIOD = 14         # standard RSI lookback window
-BETWEEN_CALLS_SECONDS = 6   # pause between each coin's history request
+CHART_DAYS = 30              # days of history to chart and to compute RSI from
+RSI_PERIOD = 14               # standard RSI lookback window
+BETWEEN_CALLS_SECONDS = 6     # pause between each coin's history request
+
+# Illustrative TP/SL, shown only when RSI is at an extreme. Fixed 2:1
+# reward:risk by default - not a prediction, just a mechanical reference.
+SL_PCT = 0.02   # 2% adverse move
+TP_PCT = 0.04   # 4% favorable move
+
+# Africa/Lagos = WAT = UTC+1 year-round, no DST to worry about.
+LOCAL_TZ = ZoneInfo("Africa/Lagos")
+LOCAL_TZ_LABEL = "WAT"
+
+# Discord: Settings > Advanced > enable Developer Mode, then right-click
+# your name in any server > Copy User ID. Leave blank to skip the personal
+# ping and only send @everyone.
+PING_USER_ID = ""
 
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "PASTE_YOUR_DISCORD_WEBHOOK_URL_HERE")
 
@@ -131,6 +148,20 @@ def rsi_label(rsi):
     return f"{rsi:.0f} \u00b7 neutral"
 
 
+def compute_trade_levels(price, rsi):
+    """Illustrative TP/SL, only when RSI is at an extreme. Fixed 2:1
+    reward:risk math off the current price - not a forecast, not advice."""
+    if rsi is None or price is None:
+        return None
+    if rsi <= 30:
+        return {"direction": "possible long (oversold)", "entry": price,
+                 "sl": price * (1 - SL_PCT), "tp": price * (1 + TP_PCT)}
+    if rsi >= 70:
+        return {"direction": "possible short (overbought)", "entry": price,
+                 "sl": price * (1 + SL_PCT), "tp": price * (1 - TP_PCT)}
+    return None
+
+
 def format_number(n):
     if n is None:
         return "?"
@@ -144,13 +175,24 @@ def format_number(n):
 
 
 def build_message(current_data, rsi_by_id):
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    lines = [f"**Crypto Price Update** \u2014 {now}", ""]
+    now_utc = datetime.now(timezone.utc)
+    now_local = now_utc.astimezone(LOCAL_TZ)
+    time_str = (
+        f"{now_local.strftime('%Y-%m-%d %H:%M')} {LOCAL_TZ_LABEL}"
+        f"  /  {now_utc.strftime('%H:%M')} UTC"
+    )
+
+    mentions = ["@everyone"]
+    if PING_USER_ID:
+        mentions.append(f"<@{PING_USER_ID}>")
+
+    lines = [" ".join(mentions), "", f"**Crypto Price Update** \u2014 {time_str}", ""]
 
     for coin_id, symbol in COINS.items():
         info = current_data.get(coin_id)
         if not info:
             lines.append(f"{symbol}: no data")
+            lines.append("")
             continue
 
         price = info.get("usd")
@@ -166,13 +208,41 @@ def build_message(current_data, rsi_by_id):
             f"| cap ${format_number(cap)}  | RSI(14d): {rsi_label(rsi)}"
         )
 
-    lines.append("")
+        levels = compute_trade_levels(price, rsi)
+        if levels:
+            lines.append(
+                f"   \u21b3 {levels['direction']} \u2014 entry ~${format_number(levels['entry'])}, "
+                f"TP ${format_number(levels['tp'])}, SL ${format_number(levels['sl'])} "
+                f"(illustrative 2:1, not advice)"
+            )
+
+        lines.append("")  # breathing room between coins
+
     lines.append(
-        "_RSI is a mechanical momentum indicator, not a buy/sell call \u2014 "
-        "\"overbought\"/\"oversold\" just describe recent price momentum, "
-        "not a prediction. Not financial advice._"
+        "_RSI is a mechanical momentum indicator; TP/SL above is a fixed "
+        "illustrative 2:1 ratio off current price, not a forecast or "
+        "personalized advice. Not financial advice._"
     )
     return "\n".join(lines)
+
+
+def split_message(message, limit=1900):
+    """Discord caps content at 2000 chars - split on the blank-line
+    boundaries between coin blocks if we're ever over that."""
+    if len(message) <= limit:
+        return [message]
+    parts = message.split("\n\n")
+    chunks, current = [], ""
+    for part in parts:
+        candidate = (current + "\n\n" + part) if current else part
+        if len(candidate) > limit and current:
+            chunks.append(current)
+            current = part
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks
 
 
 def build_chart(history_by_id):
@@ -201,11 +271,21 @@ def build_chart(history_by_id):
 
 
 def send_to_discord(message, chart_buf):
-    payload = {"content": message}
+    chunks = split_message(message)
+
+    payload = {"content": chunks[0], "allowed_mentions": {"parse": ["everyone", "users"]}}
     files = {"file": ("crypto_chart.png", chart_buf, "image/png")}
     data = {"payload_json": json.dumps(payload)}
     resp = requests.post(DISCORD_WEBHOOK_URL, data=data, files=files, timeout=30)
     resp.raise_for_status()
+
+    for chunk in chunks[1:]:
+        resp = requests.post(
+            DISCORD_WEBHOOK_URL,
+            json={"content": chunk, "allowed_mentions": {"parse": []}},
+            timeout=15,
+        )
+        resp.raise_for_status()
 
 
 def main():
