@@ -1,14 +1,15 @@
 """
-Hourly crypto price + trend reporter -> Discord
--------------------------------------------------
-Fetches current prices, 24h change, a simple RSI-based momentum read, an
+Hourly forex & metals reporter -> Discord + Telegram
+-------------------------------------------------------
+Fetches current quotes, % change, an RSI-based momentum read, an
 illustrative TP/SL when RSI flags an extreme, and a price chart, for a list
-of coins from CoinGecko's free public API. Posts a formatted summary +
-chart image to a Discord webhook, pinging @everyone and (optionally) one
-specific person.
+of forex pairs and metals from Twelve Data's API. Posts the summary + chart
+image to Discord (with @everyone / personal ping) and, if configured,
+Telegram too.
 
-No login, no cookies, no account needed - this is a public API meant for
-exactly this kind of use.
+Requires a free API key: twelvedata.com -> sign up -> API key on your
+dashboard. The free tier has a requests-per-minute cap, which is why calls
+are paced with a delay between them.
 
 Setup:
     pip install requests matplotlib
@@ -17,123 +18,121 @@ Setup:
 import io
 import json
 import os
+import re
 import time
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 import matplotlib
-matplotlib.use("Agg")  # no display available on a server/CI runner
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import requests
 
 # ================= CONFIG =================
 
-# CoinGecko coin IDs (not ticker symbols) on the left, display symbol on the
-# right. Add/remove freely. Full ID list: api.coingecko.com/api/v3/coins/list
-COINS = {
-    "bitcoin": "BTC",
-    "ethereum": "ETH",
-    "solana": "SOL",
-    "binancecoin": "BNB",
-    "ripple": "XRP",
-    "dogecoin": "DOGE",
-    "cardano": "ADA",
-    "polkadot": "DOT",
-    "litecoin": "LTC",
-    "chainlink": "LINK",
-    "avalanche-2": "AVAX",
-    "tron": "TRX",
-    "shiba-inu": "SHIB",
+# Twelve Data symbols (BASE/QUOTE) on the left, display label on the right.
+# Add/remove freely - symbol list at twelvedata.com/symbolsearch
+PAIRS = {
+    "XAU/USD": "Gold (XAU)",
+    "XAG/USD": "Silver (XAG)",
+    "EUR/USD": "EUR/USD",
+    "GBP/USD": "GBP/USD",
+    "USD/JPY": "USD/JPY",
+    "AUD/USD": "AUD/USD",
+    "USD/CAD": "USD/CAD",
+    "USD/CHF": "USD/CHF",
 }
 
-CHART_DAYS = 30              # days of history to chart and to compute RSI from
-RSI_PERIOD = 14               # standard RSI lookback window
-BETWEEN_CALLS_SECONDS = 6     # pause between each coin's history request
+CHART_DAYS = 30
+RSI_PERIOD = 14
+BETWEEN_CALLS_SECONDS = 8   # Twelve Data's free tier has a per-minute cap
 
-# Illustrative TP/SL, shown only when RSI is at an extreme. Fixed 2:1
-# reward:risk by default - not a prediction, just a mechanical reference.
-SL_PCT = 0.02   # 2% adverse move
-TP_PCT = 0.04   # 4% favorable move
+# Illustrative TP/SL, shown only when RSI is at an extreme. Forex/metals
+# move far less per day than crypto, so these are deliberately tighter
+# than the crypto version was. Fixed 2:1 reward:risk - not a forecast.
+SL_PCT = 0.005   # 0.5% adverse move
+TP_PCT = 0.01    # 1% favorable move
 
 # Africa/Lagos = WAT = UTC+1 year-round, no DST to worry about.
 LOCAL_TZ = ZoneInfo("Africa/Lagos")
 LOCAL_TZ_LABEL = "WAT"
 
-# Discord: Settings > Advanced > enable Developer Mode, then right-click
-# your name in any server > Copy User ID. Leave blank to skip the personal
-# ping and only send @everyone.
+# Discord: Settings > Advanced > Developer Mode, then right-click your name
+# in any server > Copy User ID. Leave blank to skip the personal ping.
 PING_USER_ID = ""
 
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL", "PASTE_YOUR_DISCORD_WEBHOOK_URL_HERE")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+TWELVEDATA_API_KEY = os.environ.get("TWELVEDATA_API_KEY", "PASTE_YOUR_TWELVEDATA_KEY_HERE")
 
 # ============================================
 
-SIMPLE_PRICE_URL = "https://api.coingecko.com/api/v3/simple/price"
-MARKET_CHART_URL = "https://api.coingecko.com/api/v3/coins/{id}/market_chart"
+QUOTE_URL = "https://api.twelvedata.com/quote"
+TIME_SERIES_URL = "https://api.twelvedata.com/time_series"
 
 
-def _get_with_retry(url, params, max_retries=5, base_delay=8):
-    """GET with exponential backoff specifically for CoinGecko's 429s."""
+def _get_with_retry(url, params, max_retries=5, base_delay=10):
+    """GET with exponential backoff. Twelve Data sometimes signals rate
+    limiting via HTTP 429, sometimes via a 200 response with an error body -
+    checking for both rather than trusting just the status code."""
     delay = base_delay
     for attempt in range(max_retries):
         resp = requests.get(url, params=params, timeout=15)
-        if resp.status_code == 429:
+        data = None
+        try:
+            data = resp.json()
+        except ValueError:
+            pass
+
+        is_rate_limited = resp.status_code == 429 or (
+            isinstance(data, dict) and data.get("code") == 429
+        )
+        if is_rate_limited:
             if attempt == max_retries - 1:
                 break
             print(f"Rate limited, waiting {delay}s (retry {attempt + 1}/{max_retries})...")
             time.sleep(delay)
             delay *= 2
             continue
-        if resp.status_code == 401:
-            raise RuntimeError(
-                "Got HTTP 401 from CoinGecko - they may now require a free "
-                "API key for this endpoint. Sign up at coingecko.com/api "
-                "and we can add it as a header."
-            )
+
+        if isinstance(data, dict) and data.get("status") == "error":
+            raise RuntimeError(f"Twelve Data error: {data.get('message', data)}")
+
         resp.raise_for_status()
-        return resp
+        return data
 
     raise RuntimeError(
-        "Still rate-limited by CoinGecko after several retries. Try "
-        "increasing BETWEEN_CALLS_SECONDS, reducing the number of coins, "
-        "or getting a free API key at coingecko.com/api."
+        "Still rate-limited by Twelve Data after several retries. Try "
+        "increasing BETWEEN_CALLS_SECONDS or reducing the number of pairs."
     )
 
 
-def fetch_current(ids):
-    params = {
-        "ids": ",".join(ids),
-        "vs_currencies": "usd",
-        "include_24hr_change": "true",
-        "include_market_cap": "true",
-    }
-    resp = _get_with_retry(SIMPLE_PRICE_URL, params)
-    return resp.json()
+def fetch_quote(symbol):
+    return _get_with_retry(QUOTE_URL, {"symbol": symbol, "apikey": TWELVEDATA_API_KEY})
 
 
-def fetch_history(coin_id, days=CHART_DAYS):
-    resp = _get_with_retry(
-        MARKET_CHART_URL.format(id=coin_id),
-        {"vs_currency": "usd", "days": days},
+def fetch_history(symbol, days=CHART_DAYS):
+    data = _get_with_retry(
+        TIME_SERIES_URL,
+        {"symbol": symbol, "interval": "1day", "outputsize": days, "apikey": TWELVEDATA_API_KEY},
     )
-    prices = resp.json().get("prices", [])
-    return [p[1] for p in prices]
+    values = data.get("values", []) if isinstance(data, dict) else []
+    prices = [float(v["close"]) for v in values if "close" in v]
+    prices.reverse()  # Twelve Data returns newest-first; RSI needs oldest-first
+    return prices
 
 
 def compute_rsi(prices, period=RSI_PERIOD):
     if len(prices) < period + 1:
         return None
-
     deltas = [prices[i] - prices[i - 1] for i in range(1, len(prices))]
     gains = [d if d > 0 else 0 for d in deltas]
     losses = [-d if d < 0 else 0 for d in deltas]
-
     avg_gain = sum(gains[-period:]) / period
     avg_loss = sum(losses[-period:]) / period
-
     if avg_loss == 0:
         return 100.0
-
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
@@ -150,7 +149,7 @@ def rsi_label(rsi):
 
 def compute_trade_levels(price, rsi):
     """Illustrative TP/SL, only when RSI is at an extreme. Fixed 2:1
-    reward:risk math off the current price - not a forecast, not advice."""
+    reward:risk off current price - not a forecast, not advice."""
     if rsi is None or price is None:
         return None
     if rsi <= 30:
@@ -162,19 +161,15 @@ def compute_trade_levels(price, rsi):
     return None
 
 
-def format_number(n):
+def format_price(n):
     if n is None:
         return "?"
-    if n >= 1_000_000_000:
-        return f"{n / 1_000_000_000:.2f}B"
-    if n >= 1_000_000:
-        return f"{n / 1_000_000:.2f}M"
-    if n >= 1:
+    if n >= 10:
         return f"{n:,.2f}"
-    return f"{n:.6f}"
+    return f"{n:.5f}"
 
 
-def build_message(current_data, rsi_by_id):
+def build_message(quotes, rsi_by_symbol):
     now_utc = datetime.now(timezone.utc)
     now_local = now_utc.astimezone(LOCAL_TZ)
     time_str = (
@@ -186,37 +181,36 @@ def build_message(current_data, rsi_by_id):
     if PING_USER_ID:
         mentions.append(f"<@{PING_USER_ID}>")
 
-    lines = [" ".join(mentions), "", f"**Crypto Price Update** \u2014 {time_str}", ""]
+    lines = [" ".join(mentions), "", f"**Forex & Metals Update** \u2014 {time_str}", ""]
 
-    for coin_id, symbol in COINS.items():
-        info = current_data.get(coin_id)
-        if not info:
-            lines.append(f"{symbol}: no data")
+    for symbol, label in PAIRS.items():
+        q = quotes.get(symbol)
+        if not q:
+            lines.append(f"{label}: no data")
             lines.append("")
             continue
 
-        price = info.get("usd")
-        change = info.get("usd_24h_change")
-        cap = info.get("usd_market_cap")
-        rsi = rsi_by_id.get(coin_id)
+        price = q.get("price")
+        change = q.get("percent_change")
+        rsi = rsi_by_symbol.get(symbol)
 
         arrow = "\U0001F7E2\u25b2" if (change or 0) >= 0 else "\U0001F534\u25bc"
         change_str = f"{change:+.2f}%" if change is not None else "?"
 
         lines.append(
-            f"**{symbol}**: ${format_number(price)}  {arrow} {change_str}  "
-            f"| cap ${format_number(cap)}  | RSI(14d): {rsi_label(rsi)}"
+            f"**{label}**: {format_price(price)}  {arrow} {change_str}  "
+            f"| RSI(14d): {rsi_label(rsi)}"
         )
 
         levels = compute_trade_levels(price, rsi)
         if levels:
             lines.append(
-                f"   \u21b3 {levels['direction']} \u2014 entry ~${format_number(levels['entry'])}, "
-                f"TP ${format_number(levels['tp'])}, SL ${format_number(levels['sl'])} "
+                f"   \u21b3 {levels['direction']} \u2014 entry ~{format_price(levels['entry'])}, "
+                f"TP {format_price(levels['tp'])}, SL {format_price(levels['sl'])} "
                 f"(illustrative 2:1, not advice)"
             )
 
-        lines.append("")  # breathing room between coins
+        lines.append("")
 
     lines.append(
         "_RSI is a mechanical momentum indicator; TP/SL above is a fixed "
@@ -227,8 +221,6 @@ def build_message(current_data, rsi_by_id):
 
 
 def split_message(message, limit=1900):
-    """Discord caps content at 2000 chars - split on the blank-line
-    boundaries between coin blocks if we're ever over that."""
     if len(message) <= limit:
         return [message]
     parts = message.split("\n\n")
@@ -245,17 +237,17 @@ def split_message(message, limit=1900):
     return chunks
 
 
-def build_chart(history_by_id):
-    n = len(history_by_id)
+def build_chart(history_by_symbol):
+    n = len(history_by_symbol)
     cols = 3
     rows = (n + cols - 1) // cols
     fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 3 * rows))
     axes = axes.flatten() if hasattr(axes, "flatten") else [axes]
 
-    for ax, (coin_id, prices) in zip(axes, history_by_id.items()):
-        symbol = COINS.get(coin_id, coin_id)
+    for ax, (symbol, prices) in zip(axes, history_by_symbol.items()):
+        label = PAIRS.get(symbol, symbol)
         ax.plot(prices, linewidth=1.5)
-        ax.set_title(f"{symbol} \u00b7 {CHART_DAYS}d")
+        ax.set_title(f"{label} \u00b7 {CHART_DAYS}d")
         ax.tick_params(labelbottom=False)
         ax.grid(alpha=0.3)
 
@@ -271,14 +263,13 @@ def build_chart(history_by_id):
 
 
 def send_to_discord(message, chart_buf):
+    chart_buf.seek(0)
     chunks = split_message(message)
-
     payload = {"content": chunks[0], "allowed_mentions": {"parse": ["everyone", "users"]}}
-    files = {"file": ("crypto_chart.png", chart_buf, "image/png")}
+    files = {"file": ("forex_chart.png", chart_buf, "image/png")}
     data = {"payload_json": json.dumps(payload)}
     resp = requests.post(DISCORD_WEBHOOK_URL, data=data, files=files, timeout=30)
     resp.raise_for_status()
-
     for chunk in chunks[1:]:
         resp = requests.post(
             DISCORD_WEBHOOK_URL,
@@ -288,25 +279,75 @@ def send_to_discord(message, chart_buf):
         resp.raise_for_status()
 
 
+def _discord_to_telegram_html(text):
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+    text = re.sub(r"_(.+?)_", r"<i>\1</i>", text)
+    return text
+
+
+def send_to_telegram(message, chart_buf):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Telegram not configured - skipping.")
+        return
+    base_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+    html_message = _discord_to_telegram_html(message)
+    chart_buf.seek(0)
+    resp = requests.post(
+        f"{base_url}/sendPhoto",
+        data={"chat_id": TELEGRAM_CHAT_ID},
+        files={"photo": ("forex_chart.png", chart_buf, "image/png")},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    resp = requests.post(
+        f"{base_url}/sendMessage",
+        data={"chat_id": TELEGRAM_CHAT_ID, "text": html_message,
+              "parse_mode": "HTML", "disable_web_page_preview": "true"},
+        timeout=15,
+    )
+    resp.raise_for_status()
+
+
 def main():
-    ids = list(COINS.keys())
+    symbols = list(PAIRS.keys())
 
-    current_data = fetch_current(ids)
+    quotes = {}
+    history_by_symbol = {}
+    rsi_by_symbol = {}
 
-    history_by_id = {}
-    rsi_by_id = {}
-    for i, coin_id in enumerate(ids):
-        prices = fetch_history(coin_id)
-        history_by_id[coin_id] = prices
-        rsi_by_id[coin_id] = compute_rsi(prices)
-        if i < len(ids) - 1:
+    for i, symbol in enumerate(symbols):
+        q = fetch_quote(symbol)
+        price = float(q["close"]) if isinstance(q, dict) and "close" in q else None
+        change = (
+            float(q["percent_change"])
+            if isinstance(q, dict) and q.get("percent_change") not in (None, "")
+            else None
+        )
+        quotes[symbol] = {"price": price, "percent_change": change}
+
+        time.sleep(BETWEEN_CALLS_SECONDS)
+
+        prices = fetch_history(symbol)
+        history_by_symbol[symbol] = prices
+        rsi_by_symbol[symbol] = compute_rsi(prices)
+
+        if i < len(symbols) - 1:
             time.sleep(BETWEEN_CALLS_SECONDS)
 
-    message = build_message(current_data, rsi_by_id)
-    chart_buf = build_chart(history_by_id)
-
+    message = build_message(quotes, rsi_by_symbol)
+    chart_buf = build_chart(history_by_symbol)
     print(message)
-    send_to_discord(message, chart_buf)
+
+    try:
+        send_to_discord(message, chart_buf)
+        print("Sent to Discord.")
+    except Exception as e:
+        print(f"Discord send failed: {e}")
+
+    try:
+        send_to_telegram(message, chart_buf)
+    except Exception as e:
+        print(f"Telegram send failed: {e}")
 
 
 if __name__ == "__main__":
